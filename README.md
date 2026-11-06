@@ -16,7 +16,7 @@ Mutter (D-Bus: org.gnome.Mutter.ScreenCast)
   -> adb reverse tcp:8080 -> phone browser (Chrome)
 ```
 
-1. **Virtual monitor.** `CreateSession` -> `RecordVirtual` -> `Start` over D-Bus (PyGObject, `Gio.DBusProxy`). Mutter emits `PipeWireStreamAdded(node_id)`. The session lives only as long as the D-Bus connection, so the GLib main loop blocks inside `add_virtual_monitor()`.
+1. **Virtual monitor.** `CreateSession` -> `RecordVirtual` -> `Start` over D-Bus (PyGObject, `Gio.DBusProxy`). Mutter emits `PipeWireStreamAdded(node_id)`. The session lives only as long as the D-Bus connection, so the GLib main loop blocks inside `add_virtual_monitor()`. The client then uses `DisplayConfig` to place the virtual monitor on the requested side.
 2. **Capture and encode.** GStreamer attaches to the PipeWire node and encodes with `x264enc` (baseline, `zerolatency`, no B-frames, `byte-stream`/`au` output). The monitor's resolution is set by the consumer's caps, since `RecordVirtual` has no size option.
 3. **Fan-out.** `FrameHub` keeps a bounded queue per client and drops to the next keyframe on overflow.
 4. **Serve.** A local HTTP server serves a canvas page and a `/stream` endpoint.
@@ -31,7 +31,7 @@ Mutter (D-Bus: org.gnome.Mutter.ScreenCast)
 | Keyframe flag | 1 byte   | `not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)`    |
 | Frame data    | variable | H.264 access unit (Annex-B)                        |
 
-Decoder config on the page: codec `avc1.42E028`, `optimizeForLatency`, no `description`.
+Decoder config on the page: codec `avc1.420033`, `optimizeForLatency`, no `description`. The page checks `VideoDecoder.isConfigSupported()` and logs the result before configuring.
 
 ## Layout
 
@@ -78,6 +78,7 @@ uv sync
    ```sh
    uv run main.py
    ```
+   It reads the phone's resolution from `adb shell wm size` (an override size wins over the physical size), caps the long side at `MAX_LONG_SIDE`, and rounds both dimensions down to even. Adjust `MAX_LONG_SIDE`, `LANDSCAPE`, or `MONITOR_SIDE` (`"left"`/`"right"`) at the top of `main.py`.
 3. Open `http://localhost:8080` in Chrome on the phone.
 4. Tap the canvas to toggle fullscreen.
 
@@ -96,14 +97,21 @@ adb reverse --remove tcp:8080
 
 - `localhost` matters: WebCodecs requires a secure context. `http://localhost` via `adb reverse` qualifies; plain `http://<LAN IP>` does not.
 - Mutter only emits frames when content changes, so an idle monitor looks frozen.
+- Mutter rejects negative logical-monitor positions. For `MONITOR_SIDE = "left"`, the client puts the virtual monitor at x=0 and shifts the other logical monitors right by its width; for `"right"`, it places the virtual monitor after the primary. Other monitors keep their scale, transform, primary flag, and current mode.
 - The canvas uses `object-fit: contain`, so a phone aspect ratio that differs from the virtual monitor shows black bars.
 - The HTTP server handles only `/` (the viewer page) and `/stream`; other paths return 404.
-- Without a caps filter, the virtual monitor is 1x1. Resolution is a parameter of `add_virtual_monitor(width, height)`.
+- Without a caps filter, the virtual monitor is 1x1. Resolution and side are parameters of `add_virtual_monitor(width, height, side="left")`.
 - A `framerate=30/1` caps constraint likely caused a "no more input formats" error, since Mutter probably offers variable framerate. It is left out.
 - `org.gnome.Mutter.*` interfaces are private and unstable. Introspect against your installed version:
   ```sh
   busctl --user introspect org.gnome.Mutter.ScreenCast /org/gnome/Mutter/ScreenCast
   ```
+
+## Diagnostics and recovery
+
+The client logs `ScreenCast.Session.Closed`, `DisplayConfig.MonitorsChanged` (with a timestamp), and every Gst bus EOS/ERROR/WARNING/state change. Set `SCRIRROR_DEBUG=1` to also print appsink frame stats every 2s.
+
+A monitor layout change can make Mutter destroy the PipeWire source node without posting EOS or an error. The client checks the source node every 2s with `pw-cli` (which ships with PipeWire), and also treats an external `MonitorsChanged` as a recovery trigger: it recreates the ScreenCast session, reattaches the consumer, and re-applies the placement. EOS/errors restart the consumer once and then fall back to a full session recreate.
 
 ## Security
 
@@ -111,7 +119,6 @@ There is no authentication. The server binds to `127.0.0.1` and is reachable onl
 
 ## Roadmap
 
-- Pass the phone's resolution into `add_virtual_monitor` (optionally sent by the page) to avoid black bars.
 - Touch input: events back over TCP, injected via `org.gnome.Mutter.RemoteDesktop` linked to the ScreenCast session (`NotifyPointerMotionAbsolute` or the touch methods).
 - Measure latency formally; try a VA-API encoder (`vah264enc`) or WebRTC if needed.
 - Optional native Android app (MediaCodec) fed by the same byte stream.

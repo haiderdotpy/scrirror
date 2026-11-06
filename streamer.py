@@ -5,7 +5,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import gi
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+from gi.repository import GLib, Gst
 
 Gst.init(None)
 
@@ -72,13 +72,26 @@ PAGE_HTML = b"""<!DOCTYPE html>
       }
     });
 
-    decoder.configure({
-      codec: "avc1.42E028",
+    const decoderConfig = {
+      codec: "avc1.420033",
       optimizeForLatency: true
-    });
+    };
+
+    let decoderConfigured = false;
 
     async function startStream() {
       try {
+        if (!decoderConfigured) {
+          const support = await VideoDecoder.isConfigSupported(decoderConfig);
+          console.log("VideoDecoder config support:", support);
+          if (!support.supported) {
+            console.error("Unsupported decoder config:", decoderConfig);
+            return;
+          }
+          decoder.configure(decoderConfig);
+          decoderConfigured = true;
+        }
+
         const response = await fetch("/stream");
         if (!response.ok || !response.body) {
           throw new Error("HTTP error " + response.status);
@@ -257,7 +270,7 @@ def start_http_server(hub, host="127.0.0.1", port=8080):
     print(f"Serving on http://{host}:{port}")
     return server 
 
-def start_pipeline(node_id, width, height, hub): 
+def start_pipeline(node_id, width, height, hub, on_failure=None, on_playing=None): 
     pipeline = Gst.parse_launch(
         f"pipewiresrc path={node_id} ! "
         f"video/x-raw,width={width},height={height} ! "
@@ -279,6 +292,38 @@ def start_pipeline(node_id, width, height, hub):
             buf.unmap(info)
         return Gst.FlowReturn.OK
 
+    def on_bus_message(bus, message):
+        message_type = message.type
+        if message_type == Gst.MessageType.EOS:
+            print("GStreamer bus: EOS")
+            if on_failure:
+                on_failure("eos")
+        elif message_type == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            print("GStreamer bus: ERROR:", err.message)
+            print("GStreamer bus: ERROR debug:", debug)
+            if on_failure:
+                on_failure("error")
+        elif message_type == Gst.MessageType.WARNING:
+            err, debug = message.parse_warning()
+            print("GStreamer bus: WARNING:", err.message)
+            print("GStreamer bus: WARNING debug:", debug)
+        elif message_type == Gst.MessageType.STATE_CHANGED and message.src == pipeline:
+            old_state, new_state, pending = message.parse_state_changed()
+            print(
+                "GStreamer bus: state",
+                old_state.value_nick, "->", new_state.value_nick,
+                "(pending", pending.value_nick + ")",
+            )
+            if new_state == Gst.State.PLAYING:
+                sink = pipeline.get_by_name("sink")
+                caps = sink.get_static_pad("sink").get_current_caps()
+                print("Negotiated caps:", caps.to_string() if caps else "unknown")
+                if on_playing:
+                    on_playing()
+        return True
+
+    watch_id = pipeline.get_bus().add_watch(GLib.PRIORITY_DEFAULT, on_bus_message)
     pipeline.get_by_name("sink").connect("new-sample", on_sample)
     pipeline.set_state(Gst.State.PLAYING)
-    return pipeline
+    return pipeline, watch_id
