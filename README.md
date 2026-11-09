@@ -71,7 +71,6 @@ gir1.2-gst-plugins-base-1.0
 Use the **system Python**, not Anaconda. Conda's GLib clashes with the system `libgirepository` (`undefined symbol: g_once_init_leave_pointer`). `.python-version` pins 3.12, so `uv sync` alone honors it; only pass `--python /usr/bin/python3` if uv would otherwise pick an interpreter from a conda environment.
 
 ```sh
-cd scrirror/desktop_client
 uv sync
 # if conda is active: uv venv --python /usr/bin/python3 && uv sync
 ```
