@@ -6,6 +6,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gio, GLib, Gst
 from streamer import FrameHub, start_http_server, start_pipeline
+from video_codecs import create_codec
 
 Gst.init(None)
 
@@ -207,14 +208,17 @@ def _apply_layout(display, virtual_connector, width, side, retry=True):
     return True
 
 
-def add_virtual_monitor(width=1920, height=1080, side="left"):
+def add_virtual_monitor(
+    width=1920, height=1080, side="left", codec="h264", jpeg_quality=70
+):
     if side not in ("left", "right"):
         raise ValueError("side must be 'left' or 'right'")
 
+    video_codec = create_codec(codec, jpeg_quality=jpeg_quality)
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
     loop = GLib.MainLoop()
-    hub = FrameHub()
-    start_http_server(hub)
+    hub = FrameHub(max_queue_size=video_codec.queue_depth)
+    start_http_server(hub, video_codec)
 
     screencast = _proxy(bus, SCREENCAST_BUS, SCREENCAST_PATH, SCREENCAST_IFACE)
     display = _proxy(bus, DISPLAY_CONFIG_BUS, DISPLAY_CONFIG_PATH, DISPLAY_CONFIG_IFACE)
@@ -287,7 +291,7 @@ def add_virtual_monitor(width=1920, height=1080, side="left"):
             on_gst_failure(reason, generation)
 
         state["pipeline"], state["watch_id"] = start_pipeline(
-            state["node_id"], width, height, hub,
+            state["node_id"], width, height, hub, video_codec,
             on_failure=on_failure,
             on_playing=on_pipeline_playing,
         )
